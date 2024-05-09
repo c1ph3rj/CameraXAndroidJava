@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Scan Detail</string>
+    <string name="reset_timer">00:00:00</string>
+</resources>
