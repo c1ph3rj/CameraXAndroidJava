@@ -5,10 +5,14 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ContentValues;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
 import android.os.Environment;
 import android.os.Handler;
 import android.provider.MediaStore;
 import android.util.Log;
+import android.util.Size;
 import android.view.MotionEvent;
 import android.view.OrientationEventListener;
 import android.view.ScaleGestureDetector;
@@ -22,8 +26,10 @@ import androidx.camera.core.CameraControl;
 import androidx.camera.core.CameraInfo;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.FocusMeteringAction;
+import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
+import androidx.camera.core.ImageProxy;
 import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.MeteringPointFactory;
 import androidx.camera.core.Preview;
@@ -43,11 +49,21 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleOwner;
 
+import com.google.ar.core.ArCoreApk;
+import com.google.ar.core.Session;
+import com.google.ar.core.SharedCamera;
+import com.google.ar.core.exceptions.UnavailableApkTooOldException;
+import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException;
+import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException;
+import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.EnumSet;
 import java.util.Locale;
 import java.util.concurrent.Executor;
 
@@ -85,7 +101,7 @@ public class CameraService {
         handleAdditionalFunctions();
     }
 
-    CameraService(Activity activity, PreviewView cameraPreview, boolean tapToFocus, boolean pinchToZoom, CameraChangesListener cameraChangesListener) {
+    CameraService(Activity activity, PreviewView cameraPreview, boolean tapToFocus, boolean pinchToZoom, CameraChangesListener cameraChangesListener) throws UnavailableDeviceNotCompatibleException, UnavailableSdkTooOldException, UnavailableArcoreNotInstalledException, UnavailableApkTooOldException {
         this.activity = activity;
         this.cameraPreview = cameraPreview;
         this.handler = new Handler();
@@ -182,9 +198,30 @@ public class CameraService {
 
                     CameraSelector cameraSelector = new CameraSelector.Builder().requireLensFacing(cameraPosition).build();
 
+                    ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build();
+                    imageAnalysis.setAnalyzer(executor, new ImageAnalysis.Analyzer() {
+                        @Override
+                        public void analyze(@NonNull ImageProxy imageProxy) {
+                            int rotationDegrees = imageProxy.getImageInfo().getRotationDegrees();
+                            // insert your code here.
+                            try {
+                                Bitmap sourceBitmap = imageProxy.toBitmap();
+                                Bitmap rotatedBitmap = rotateBitmap(sourceBitmap, rotationDegrees);
+
+
+                            } catch (Exception e) {
+                                e.printStackTrace(System.out);
+                            }
+                            // after done, release the ImageProxy object
+                            imageProxy.close();
+                        }
+                    });
+
                     cameraProvider.unbindAll();
 
-                    camera = cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, preview, imageCapture, videoCapture);
+                    camera = cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, preview, imageCapture, videoCapture, imageAnalysis);
 
                     preview.setSurfaceProvider(cameraPreview.getSurfaceProvider());
 
@@ -394,6 +431,33 @@ public class CameraService {
 
                 @Override
                 public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
+
+                    Bitmap capturedImage = BitmapFactory.decodeFile(file.getAbsolutePath());
+
+                    // Define ROI in PreviewView
+                    int previewWidth = cameraPreview.getWidth();
+                    int previewHeight = cameraPreview.getHeight();
+                    int sideLength = 350; // Define the side length of the square ROI
+
+                    int roiX = (previewWidth - sideLength) / 2;
+                    int roiY = (previewHeight - sideLength) / 2;
+
+                    // Calculate scaling factors
+                    float widthScale = (float) capturedImage.getWidth() / previewWidth;
+                    float heightScale = ((float) capturedImage.getHeight()) / previewHeight;
+
+                    // Calculate scaled ROI coordinates and dimensions
+                    int scaledRoiX = Math.round(roiX * widthScale);
+                    int scaledRoiY = Math.round(roiY * heightScale);
+                    int scaledRoiWidth = Math.round(sideLength * widthScale);
+                    int scaledRoiHeight = Math.round(sideLength * heightScale) - 20;
+
+                    // Crop the image
+                    Bitmap croppedImage = Bitmap.createBitmap(capturedImage, scaledRoiX, scaledRoiY, scaledRoiWidth, scaledRoiHeight);
+
+                    // Save the cropped image back to the file or handle as needed
+                    saveCroppedImage(croppedImage, file);
+
                     if (cameraChangesListener != null) {
                         cameraChangesListener.onImageSaved(outputFileResults);
                     }
@@ -409,6 +473,21 @@ public class CameraService {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private void saveCroppedImage(Bitmap croppedImage, File file) {
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            croppedImage = rotateBitmap(croppedImage, 90);
+            croppedImage.compress(Bitmap.CompressFormat.JPEG, 90, out);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private Bitmap rotateBitmap(Bitmap source, float degree) {
+        Matrix matrix = new Matrix();
+        matrix.postRotate(degree);
+        return Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(), matrix, true);
     }
 
     public void turnOffFlash() {
